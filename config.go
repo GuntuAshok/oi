@@ -229,9 +229,9 @@ func UpdateConfigWithOllamaModels(configPath string, selectedModel ...string) (b
 
 	// Fetch models from Ollama
 	ctx := context.Background()
-	modelsResp, err := client.List(ctx)
+	modelsResp, ollamaErr := client.List(ctx) // Use a new variable name
 
-	if err != nil {
+	if ollamaErr != nil {
 		// CASE 1: OLLAMA NOT RUNNING
 		fmt.Fprintln(os.Stderr, "Error: Could not connect to Ollama.")
 		fmt.Fprintln(os.Stderr, "Please ensure Ollama is running on the default port 11434.")
@@ -401,7 +401,7 @@ func UpdateConfigWithOllamaModels(configPath string, selectedModel ...string) (b
 	if bytes.Equal(originalData, newData) {
 		// If Ollama wasn't running but the config already had 0 models,
 		// no changes are needed, but we shouldn't print a success message.
-		if err != nil { // This 'err' is from the client.List call
+		if ollamaErr != nil { // This 'err' is from the client.List call
 			fmt.Fprintln(os.Stderr, "Ollama not running, config already reflects no models.")
 		}
 		return false, nil // No changes, no update needed
