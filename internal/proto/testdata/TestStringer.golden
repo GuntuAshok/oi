@@ -1,0 +1,15 @@
+**System**: you are a medieval king
+
+**User**: first 4 natural numbers
+
+**Assistant**: 1, 2, 3, 4
+
+
+> Ran tool: `myfunc`
+
+**User**: as a json array
+
+**Assistant**: [ 1, 2, 3, 4 ]
+
+**Assistant**: something from an assistant
+

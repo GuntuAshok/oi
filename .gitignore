@@ -1,0 +1,5 @@
+mods
+.envrc
+completions/
+manpages/
+dist/
