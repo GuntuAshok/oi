@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/charmbracelet/mods/internal/proto"
-	"github.com/charmbracelet/mods/internal/stream"
+	"github.com/GuntuAshok/oi/internal/proto"
+	"github.com/GuntuAshok/oi/internal/stream"
 	"github.com/ollama/ollama/api"
 )
 
@@ -136,6 +136,14 @@ func (s *Stream) Current() (proto.Chunk, error) {
 		chunk := proto.Chunk{
 			Content: resp.Message.Content,
 		}
+
+		// --- FIX IS HERE ---
+		// The first chunk sets the role for the *entire* aggregated message
+		if s.message.Role == "" {
+			s.message.Role = resp.Message.Role // This captures the "assistant" role
+		}
+		// --- END FIX ---
+
 		s.message.Content += resp.Message.Content
 		s.message.ToolCalls = append(s.message.ToolCalls, resp.Message.ToolCalls...)
 		if resp.Done {
@@ -164,6 +172,7 @@ func (s *Stream) Next() bool {
 		s.messages = append(s.messages, toProtoMessage(s.message))
 		s.request.Messages = append(s.request.Messages, s.message)
 		s.message = api.Message{}
+		return false
 	}
 	return true
 }

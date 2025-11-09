@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
+	"bytes"
 	"path/filepath"
 	"text/template"
 	"time"
@@ -15,6 +19,7 @@ import (
 	"github.com/caarlos0/env/v9"
 	"github.com/charmbracelet/x/exp/strings"
 	"github.com/muesli/termenv"
+	"github.com/ollama/ollama/api"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
@@ -75,6 +80,7 @@ var help = map[string]string{
 	"mcp-list":          "List all available MCP servers",
 	"mcp-list-tools":    "List all available tools from enabled MCP servers",
 	"mcp-timeout":       "Timeout for MCP server calls, defaults to 15 seconds",
+	"chat":              "Enter interactive chat mode (REPL)", // Add this line
 }
 
 // Model represents the LLM model used in the API call.
@@ -185,6 +191,7 @@ type Config struct {
 	Delete              []string
 	DeleteOlderThan     time.Duration
 	User                string
+	Chat                bool // Add this line
 
 	MCPServers   map[string]MCPServerConfig `yaml:"mcp-servers"`
 	MCPList      bool
@@ -204,6 +211,225 @@ type MCPServerConfig struct {
 	Args    []string `yaml:"args"`
 	URL     string   `yaml:"url"`
 }
+
+
+
+// UpdateConfigWithOllamaModels replaces apis -> ollama -> models with the current
+// models reported by the local Ollama instance, and updates default-model only if needed:
+// If default-model exists and is present in fetched models leave it.
+// Otherwise set default-model to first model returned by Ollama (if any).
+func UpdateConfigWithOllamaModels(configPath string, selectedModel ...string) (bool, error) {
+	// Parse Ollama base URL and create client
+	baseURL, err := url.Parse("http://localhost:11434")
+	if err != nil {
+		// This is a configuration error in the code itself, should be fatal.
+		return false, modsError{err, "Failed to parse Ollama URL."}
+	}
+	client := api.NewClient(baseURL, http.DefaultClient)
+
+	// Fetch models from Ollama
+	ctx := context.Background()
+	modelsResp, err := client.List(ctx)
+
+	if err != nil {
+		// CASE 1: OLLAMA NOT RUNNING
+		fmt.Fprintln(os.Stderr, "Error: Could not connect to Ollama.")
+		fmt.Fprintln(os.Stderr, "Please ensure Ollama is running on the default port 11434.")
+		fmt.Fprintln(os.Stderr, "If it's on a different port, you may need to update your configuration.")
+		// Set modelsResp to nil to signal that we should clear the models
+		modelsResp = nil
+	}
+
+	if modelsResp != nil && len(modelsResp.Models) == 0 {
+		// CASE 2: OLLAMA RUNNING, NO MODELS
+		fmt.Fprintln(os.Stderr, "Warning: Ollama is running, but no models are installed.")
+		fmt.Fprintln(os.Stderr, "Please pull a model to use, for example: 'ollama pull gemma3'")
+		// We will proceed to write the config with an empty model list
+	}
+
+	// Read existing config file to compare against later
+	originalData, err := os.ReadFile(configPath)
+	if err != nil {
+		return false, modsError{err, "Failed to read config file."}
+	}
+
+	// Unmarshal into a yaml.Node to preserve comments and structure
+	var root yaml.Node
+	if err := yaml.Unmarshal(originalData, &root); err != nil {
+		return false, modsError{err, "Failed to parse config YAML."}
+	}
+
+	// Get the document mapping node
+	var doc *yaml.Node
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		doc = root.Content[0]
+	} else {
+		doc = &root
+	}
+	if doc == nil || doc.Kind != yaml.MappingNode {
+		return false, modsError{errors.New("invalid yaml root"), "Config root is not a mapping node."}
+	}
+
+	// --- Start of YAML manipulation logic ---
+	var chosenDefaultModel string // **Track the chosen model**
+
+	// helpers to work with mapping nodes
+	getMapValue := func(m *yaml.Node, key string) *yaml.Node {
+		if m == nil || m.Kind != yaml.MappingNode {
+			return nil
+		}
+		for i := 0; i < len(m.Content); i += 2 {
+			if k := m.Content[i]; k.Value == key {
+				return m.Content[i+1]
+			}
+		}
+		return nil
+	}
+	replaceMapValue := func(m *yaml.Node, key string, newVal *yaml.Node) bool {
+		if m == nil || m.Kind != yaml.MappingNode {
+			return false
+		}
+		for i := 0; i < len(m.Content); i += 2 {
+			if k := m.Content[i]; k.Value == key {
+				m.Content[i+1] = newVal
+				return true
+			}
+		}
+		return false
+	}
+
+	// Ensure 'apis' mapping exists
+	apisNode := getMapValue(doc, "apis")
+	if apisNode == nil {
+		apisKey := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "apis"}
+		apisVal := &yaml.Node{Kind: yaml.MappingNode}
+		doc.Content = append(doc.Content, apisKey, apisVal)
+		apisNode = apisVal
+	}
+
+	// Ensure 'ollama' mapping exists inside 'apis'
+	ollamaNode := getMapValue(apisNode, "ollama")
+	if ollamaNode == nil {
+		ollamaKey := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "ollama"}
+		ollamaVal := &yaml.Node{Kind: yaml.MappingNode}
+		apisNode.Content = append(apisNode.Content, ollamaKey, ollamaVal)
+		ollamaNode = ollamaVal
+	}
+
+	// Build a new 'models' mapping node
+	newModelsNode := &yaml.Node{Kind: yaml.MappingNode}
+	modelNames := make(map[string]struct{}, 0)
+
+	// Only add models if we successfully connected AND there are models
+	if modelsResp != nil {
+		modelNames = make(map[string]struct{}, len(modelsResp.Models))
+		for _, m := range modelsResp.Models {
+			modelNames[m.Name] = struct{}{}
+			nameKey := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: m.Name, Style: yaml.DoubleQuotedStyle}
+			modelVal := &yaml.Node{Kind: yaml.MappingNode}
+			aliasesSeq := &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!str", Value: m.Name}}}
+			modelVal.Content = append(modelVal.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "aliases"}, aliasesSeq,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "max-input-chars"}, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: "650000"},
+			)
+			newModelsNode.Content = append(newModelsNode.Content, nameKey, modelVal)
+		}
+	}
+	// If modelsResp is nil (Ollama down), newModelsNode will be empty, effectively clearing the list
+
+	// Replace or add the 'models' node
+	if !replaceMapValue(ollamaNode, "models", newModelsNode) {
+		ollamaNode.Content = append(ollamaNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "models"}, newModelsNode)
+	}
+
+	// Set/update top-level 'default-model'
+	// Only run default-model logic if we actually have models
+	if modelsResp != nil && len(modelsResp.Models) > 0 {
+		var modelToSet string
+		userSelection := ""
+		if len(selectedModel) > 0 {
+			userSelection = selectedModel[0]
+		}
+
+		existingDefaultNode := getMapValue(doc, "default-model")
+
+		if userSelection != "" {
+			// If a model was explicitly selected, it always becomes the default.
+			modelToSet = userSelection
+		} else if existingDefaultNode != nil {
+			// If no model was selected, check if the existing default is still valid.
+			if _, ok := modelNames[existingDefaultNode.Value]; ok {
+				modelToSet = existingDefaultNode.Value // It's valid, keep it.
+			}
+		}
+
+		// If modelToSet is still empty, it means we need to fall back to the first model.
+		if modelToSet == "" {
+			modelToSet = modelsResp.Models[0].Name
+		}
+
+		// **Store the chosen model for the success message**
+		chosenDefaultModel = modelToSet
+
+		// Now, apply the change.
+		if existingDefaultNode == nil {
+			// Key doesn't exist, add it.
+			defaultNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: modelToSet, Style: yaml.DoubleQuotedStyle}
+			doc.Content = append(doc.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "default-model"}, defaultNode)
+		} else {
+			// Key exists, just update its value.
+			existingDefaultNode.Value = modelToSet
+		}
+	}
+
+	// --- End of YAML manipulation logic ---
+
+	// Encode the modified YAML structure back to bytes
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&root); err != nil {
+		_ = enc.Close()
+		return false, modsError{err, "Failed to encode updated YAML."}
+	}
+	if err := enc.Close(); err != nil {
+		return false, modsError{err, "Failed to close YAML encoder."}
+	}
+	newData := buf.Bytes()
+
+	// CORE LOGIC: Only write file if content has actually changed
+	if bytes.Equal(originalData, newData) {
+		// If Ollama wasn't running but the config already had 0 models,
+		// no changes are needed, but we shouldn't print a success message.
+		if err != nil { // This 'err' is from the client.List call
+			fmt.Fprintln(os.Stderr, "Ollama not running, config already reflects no models.")
+		}
+		return false, nil // No changes, no update needed
+	}
+
+	// Content has changed, write the new data to the config file
+	if err := os.WriteFile(configPath, newData, 0o644); err != nil {
+		return false, modsError{err, "Failed to write updated config."}
+	}
+
+	// **CASE 3: SUCCESS MESSAGE**
+	if modelsResp == nil {
+		// This is the case where Ollama was down
+		fmt.Fprintln(os.Stderr, "Cleared stale Ollama models from configuration as Ollama is not running.")
+	} else if chosenDefaultModel != "" {
+		fmt.Fprintf(os.Stderr, "Configuration updated with %d Ollama models. Default model set to: %s\n", len(modelsResp.Models), chosenDefaultModel)
+	} else {
+		// This handles the case where len(modelsResp.Models) == 0
+		fmt.Fprintf(os.Stderr, "Configuration updated with %d Ollama models.\n", len(modelsResp.Models))
+	}
+
+	// Signal that the update was successful
+	return true, nil
+}
+
+
+
+
 
 func ensureConfig() (Config, error) {
 	var c Config
@@ -343,3 +569,5 @@ func usageFunc(cmd *cobra.Command) error {
 
 	return nil
 }
+
+

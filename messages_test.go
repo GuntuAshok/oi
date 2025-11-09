@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/charmbracelet/mods/internal/proto"
+	"github.com/GuntuAshok/oi/internal/proto"
 	"github.com/stretchr/testify/require"
 )
 

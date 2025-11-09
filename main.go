@@ -1,7 +1,7 @@
-// Package main provides the mods CLI.
 package main
 
 import (
+	"bufio" // Add this
 	"context"
 	"errors"
 	"fmt"
@@ -13,12 +13,12 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/GuntuAshok/oi/internal/cache"
 	"github.com/atotto/clipboard"
 	timeago "github.com/caarlos0/timea.go"
 	tea "github.com/charmbracelet/bubbletea"
 	glamour "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/mods/internal/cache"
 	"github.com/charmbracelet/x/editor"
 	mcobra "github.com/muesli/mango-cobra"
 	"github.com/muesli/roff"
@@ -67,6 +67,73 @@ func init() {
 	rootCmd.SetHelpCommand(&cobra.Command{Hidden: true})
 }
 
+// runMods contains the core logic to execute a single turn.
+// In main.go
+
+func runMods(ctx context.Context) error {
+	opts := []tea.ProgramOption{}
+
+	if !isInputTTY() || config.Raw {
+		opts = append(opts, tea.WithInput(nil))
+	}
+	if isOutputTTY() && !config.Raw {
+		opts = append(opts, tea.WithOutput(os.Stderr))
+	} else {
+		opts = append(opts, tea.WithoutRenderer())
+	}
+
+	cache, err := cache.NewConversations(config.CachePath)
+	if err != nil {
+		return modsError{err, "Couldn't create cache."}
+	}
+
+	// Pass a copy of the config to the instance
+	cfgCopy := config
+	mods := newMods(ctx, stderrRenderer(), &cfgCopy, db, cache)
+	p := tea.NewProgram(mods, opts...)
+	m, err := p.Run()
+	if err != nil {
+		return modsError{err, "Couldn't start Bubble Tea program."}
+	}
+
+	mods = m.(*Mods)
+	if mods.Error != nil {
+		return *mods.Error
+	}
+
+	// Consolidated print logic: Live streaming on stderr (via View()), final flush to stdout for persistence
+	// - Streamed cases: Flush only if needed to prevent vanish (no dupe, as live is incremental)
+	// - Non-streamed (--show): Always flush full
+	// - Non-TTY/raw: Direct full print
+	if mods.streamed && isOutputTTY() && !config.Raw {
+		// For streamed TTY: View() handled live on stderr; flush final to stdout to "commit" (blends without visible dupe)
+		switch {
+		case mods.glamOutput != "":
+			fmt.Print(mods.glamOutput)
+		case mods.Output != "":
+			fmt.Print(mods.Output)
+		}
+	} else if !config.Raw {
+		// Non-streamed or non-TTY/raw: Always print full to stdout
+		switch {
+		case mods.glamOutput != "":
+			fmt.Print(mods.glamOutput)
+		case mods.Output != "":
+			fmt.Print(mods.Output)
+		default:
+			if config.Show != "" || config.ShowLast {
+				fmt.Fprintln(os.Stderr, "[DEBUG] No output in show mode!") // Temp, remove after testing
+			}
+		}
+	}
+
+	// Save if flagged (skipped for show via zeroed cacheWriteToID)
+	if mods.Config.cacheWriteToID != "" {
+		return saveConversation(mods)
+	}
+	return nil
+}
+
 var (
 	config = defaultConfig()
 	db     *convoDB
@@ -77,61 +144,24 @@ var (
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Example:       randomExample(),
+		// In main.go
 		RunE: func(cmd *cobra.Command, args []string) error {
-			config.Prefix = removeWhitespace(strings.Join(args, " "))
-
-			opts := []tea.ProgramOption{}
-
-			if !isInputTTY() || config.Raw {
-				opts = append(opts, tea.WithInput(nil))
-			}
-			if isOutputTTY() && !config.Raw {
-				opts = append(opts, tea.WithOutput(os.Stderr))
-			} else {
-				opts = append(opts, tea.WithoutRenderer())
-			}
-			if os.Getenv("VIMRUNTIME") != "" {
-				config.Quiet = true
+			if config.FormatText == nil {
+				config.FormatText = defaultConfig().FormatText
 			}
 
-			if isNoArgs() && isInputTTY() && config.openEditor {
-				prompt, err := prefixFromEditor()
-				if err != nil {
-					return err
-				}
-				config.Prefix = prompt
+			if config.Format && config.FormatAs == "" {
+				config.FormatAs = "markdown"
 			}
 
-			if (isNoArgs() || config.AskModel) && isInputTTY() {
-				if err := askInfo(); err != nil && err == huh.ErrUserAborted {
-					return modsError{
-						err:    err,
-						reason: "User canceled.",
-					}
-				} else if err != nil {
-					return modsError{
-						err:    err,
-						reason: "Prompt failed.",
-					}
-				}
+			if config.Format && config.FormatAs != "" && config.FormatText[config.FormatAs] == "" {
+				config.FormatText[config.FormatAs] = defaultConfig().FormatText[config.FormatAs]
 			}
 
-			cache, err := cache.NewConversations(config.CachePath)
-			if err != nil {
-				return modsError{err, "Couldn't start Bubble Tea program."}
+			if config.MCPTimeout == 0 {
+				config.MCPTimeout = defaultConfig().MCPTimeout
 			}
-			mods := newMods(cmd.Context(), stderrRenderer(), &config, db, cache)
-			p := tea.NewProgram(mods, opts...)
-			m, err := p.Run()
-			if err != nil {
-				return modsError{err, "Couldn't start Bubble Tea program."}
-			}
-
-			mods = m.(*Mods)
-			if mods.Error != nil {
-				return *mods.Error
-			}
-
+			// Handle special commands (unchanged from old)
 			if config.Dirs {
 				if len(args) > 0 {
 					switch args[0] {
@@ -144,8 +174,7 @@ var (
 					}
 				}
 				fmt.Printf("Configuration: %s\n", filepath.Dir(config.SettingsPath))
-				//nolint:mnd
-				fmt.Printf("%*sCache: %s\n", 8, " ", config.CachePath)
+				fmt.Printf("%*sCache: %s\n", 8, " ", config.CachePath) //nolint:mnd
 				return nil
 			}
 
@@ -175,16 +204,6 @@ var (
 
 			if config.ResetSettings {
 				return resetSettings()
-			}
-
-			if mods.Input == "" && isNoArgs() {
-				return modsError{
-					reason: "You haven't provided any prompt input.",
-					err: newUserErrorf(
-						"You can give your prompt as arguments and/or pipe it from STDIN.\nExample: %s",
-						stdoutStyles().InlineCode.Render("mods [prompt]"),
-					),
-				}
 			}
 
 			if config.ShowHelp {
@@ -218,24 +237,96 @@ var (
 				return deleteConversationOlderThan()
 			}
 
-			// raw mode already prints the output, no need to print it again
-			if isOutputTTY() && !config.Raw {
-				switch {
-				case mods.glamOutput != "":
-					fmt.Print(mods.glamOutput)
-				case mods.Output != "":
-					fmt.Print(mods.Output)
+			// **NEW: Handle chat mode (your addition, unchanged)**
+			if config.Chat {
+				// First, let's select the model just once at the start.
+				if err := askInfo(); err != nil {
+					if err == huh.ErrUserAborted {
+						return nil // Graceful exit
+					}
+					return modsError{err: err, reason: "Model selection failed."}
+				}
+
+				// We don't want the TUI to re-print the prompt.
+				config.IncludePromptArgs = false
+
+				// Now, enter a single, consistent loop for the whole conversation.
+				reader := bufio.NewReader(os.Stdin)
+				isFirstTurn := true
+				for {
+					fmt.Fprint(os.Stderr, "> ")
+
+					nextPrompt, err := reader.ReadString('\n')
+					if err != nil {
+						if err == io.EOF { // Handle Ctrl+D
+							break // Exit the loop cleanly
+						}
+						return modsError{err: err, reason: "Failed to read prompt."}
+					}
+
+					trimmedPrompt := strings.TrimSpace(nextPrompt)
+					if trimmedPrompt == "exit" || trimmedPrompt == "quit" {
+						break // Exit the loop cleanly
+					}
+					if trimmedPrompt == "" {
+						continue
+					}
+
+					// Prepare for the next turn
+					config.Prefix = trimmedPrompt
+					if isFirstTurn {
+						config.ContinueLast = false
+						isFirstTurn = false
+					} else {
+						config.ContinueLast = true
+					}
+
+					if err := runMods(cmd.Context()); err != nil {
+						handleError(err)
+					}
+				}
+
+				fmt.Println("\nExiting chat.")
+				return nil
+			}
+
+			// **OLD NON-CHAT PATH: Prefix, editor, askInfo (unchanged)**
+			config.Prefix = removeWhitespace(strings.Join(args, " "))
+
+			if isNoArgs() && isInputTTY() && config.openEditor {
+				prompt, err := prefixFromEditor()
+				if err != nil {
+					return err
+				}
+				config.Prefix = prompt
+			}
+
+			if (isNoArgs() || config.AskModel) && isInputTTY() {
+				if err := askInfo(); err != nil && err == huh.ErrUserAborted {
+					return modsError{
+						err:    err,
+						reason: "User canceled.",
+					}
+				} else if err != nil {
+					return modsError{
+						err:    err,
+						reason: "Prompt failed.",
+					}
 				}
 			}
 
+			// **RUN THE PROGRAM: This loads/prints for --show, or generates for prompts**
+			if err := runMods(cmd.Context()); err != nil {
+				return err
+			}
+
+			// **NEW: Skip further processing (e.g., hypothetical save) for show modes**
+			// (Prevents any post-print saves; matches old behavior)
 			if config.Show != "" || config.ShowLast {
 				return nil
 			}
 
-			if config.cacheWriteToID != "" {
-				return saveConversation(mods)
-			}
-
+			// For non-show prompts, nothing else needed (save happens inside runMods if cacheWriteToID set)
 			return nil
 		},
 	}
@@ -286,6 +377,8 @@ func initFlags() {
 	flags.BoolVar(&config.MCPList, "mcp-list", false, stdoutStyles().FlagDesc.Render(help["mcp-list"]))
 	flags.BoolVar(&config.MCPListTools, "mcp-list-tools", false, stdoutStyles().FlagDesc.Render(help["mcp-list-tools"]))
 	flags.StringArrayVar(&config.MCPDisable, "mcp-disable", nil, stdoutStyles().FlagDesc.Render(help["mcp-disable"]))
+	// Add the new --chat flag
+	flags.BoolVar(&config.Chat, "chat", false, stdoutStyles().FlagDesc.Render(help["chat"]))
 	flags.Lookup("prompt").NoOptDefVal = "-1"
 	flags.SortFlags = false
 
@@ -302,22 +395,6 @@ func initFlags() {
 		return roleNames(toComplete), cobra.ShellCompDirectiveDefault
 	})
 
-	if config.FormatText == nil {
-		config.FormatText = defaultConfig().FormatText
-	}
-
-	if config.Format && config.FormatAs == "" {
-		config.FormatAs = "markdown"
-	}
-
-	if config.Format && config.FormatAs != "" && config.FormatText[config.FormatAs] == "" {
-		config.FormatText[config.FormatAs] = defaultConfig().FormatText[config.FormatAs]
-	}
-
-	if config.MCPTimeout == 0 {
-		config.MCPTimeout = defaultConfig().MCPTimeout
-	}
-
 	rootCmd.MarkFlagsMutuallyExclusive(
 		"settings",
 		"show",
@@ -330,6 +407,7 @@ func initFlags() {
 		"reset-settings",
 		"mcp-list",
 		"mcp-list-tools",
+		"chat", // Add this line
 	)
 }
 
@@ -339,13 +417,27 @@ func main() {
 	config, err = ensureConfig()
 	if err != nil {
 		handleError(modsError{err, "Could not load your configuration file."})
-		// if user is editing the settings, only print out the error, but do
-		// not exit.
 		if !slices.Contains(os.Args, "--settings") {
 			os.Exit(1)
 		}
 	}
 
+	// Automatically update config on every run
+	updated, err := UpdateConfigWithOllamaModels(config.SettingsPath)
+	if err != nil {
+		// Log a warning if the update function itself had an internal error
+		fmt.Fprintf(os.Stderr, "Warning: could not update Ollama models: %v\n", err)
+	}
+
+	// If the config file was changed on disk, reload it into memory
+	if updated {
+		config, err = ensureConfig() // This is the crucial step
+		if err != nil {
+			// This is a critical error, as the config is now out of sync.
+			handleError(modsError{err, "Could not reload the updated configuration file."})
+			os.Exit(1)
+		}
+	}
 	// XXX: this must come after creating the config.
 	initFlags()
 
@@ -714,9 +806,10 @@ func printList(conversations []Conversation) {
 	}
 }
 
+// saveConversation has been corrected to use the session-specific config from the Mods instance.
 func saveConversation(mods *Mods) error {
-	if config.NoCache {
-		if !config.Quiet {
+	if mods.Config.NoCache {
+		if !mods.Config.Quiet {
 			fmt.Fprintf(
 				os.Stderr,
 				"\nConversation was not saved because %s or %s is set.\n",
@@ -727,9 +820,8 @@ func saveConversation(mods *Mods) error {
 		return nil
 	}
 
-	// if message is a sha1, use the last prompt instead.
-	id := config.cacheWriteToID
-	title := strings.TrimSpace(config.cacheWriteToTitle)
+	id := mods.Config.cacheWriteToID
+	title := strings.TrimSpace(mods.Config.cacheWriteToTitle)
 
 	if sha1reg.MatchString(title) || title == "" {
 		title = firstLine(lastPrompt(mods.messages))
@@ -737,27 +829,27 @@ func saveConversation(mods *Mods) error {
 
 	errReason := fmt.Sprintf(
 		"There was a problem writing %s to the cache. Use %s / %s to disable it.",
-		config.cacheWriteToID,
+		id,
 		stderrStyles().InlineCode.Render("--no-cache"),
 		stderrStyles().InlineCode.Render("NO_CACHE"),
 	)
-	cache, err := cache.NewConversations(config.CachePath)
+	cache, err := cache.NewConversations(mods.Config.CachePath)
 	if err != nil {
 		return modsError{err, errReason}
 	}
 	if err := cache.Write(id, &mods.messages); err != nil {
 		return modsError{err, errReason}
 	}
-	if err := db.Save(id, title, config.API, config.Model); err != nil {
+	if err := db.Save(id, title, mods.Config.API, mods.Config.Model); err != nil {
 		_ = cache.Delete(id) // remove leftovers
 		return modsError{err, errReason}
 	}
 
-	if !config.Quiet {
+	if !mods.Config.Quiet {
 		fmt.Fprintln(
 			os.Stderr,
 			"\nConversation saved:",
-			stderrStyles().InlineCode.Render(config.cacheWriteToID[:sha1short]),
+			stderrStyles().InlineCode.Render(id[:sha1short]),
 			stderrStyles().Comment.Render(title),
 		)
 	}
@@ -780,28 +872,21 @@ func isNoArgs() bool {
 		!config.ResetSettings
 }
 
+// In main.go
 func askInfo() error {
+	// --- This setup part is unchanged ---
 	var foundModel bool
-	apis := make([]huh.Option[string], 0, len(config.APIs))
 	opts := map[string][]huh.Option[string]{}
 	for _, api := range config.APIs {
-		apis = append(apis, huh.NewOption(api.Name, api.Name))
 		for name, model := range api.Models {
 			opts[api.Name] = append(opts[api.Name], huh.NewOption(name, name))
-
-			// checks if this is the model we intend to use if not using
-			// `--ask-model`:
-			if !config.AskModel &&
-				(config.API == "" || config.API == api.Name) &&
-				(config.Model == name || slices.Contains(model.Aliases, config.Model)) {
-				// if it is, adjusts api and model so its cheaper later on.
+			if !config.AskModel && (config.API == "" || config.API == api.Name) && (config.Model == name || slices.Contains(model.Aliases, config.Model)) {
 				config.API = api.Name
 				config.Model = name
 				foundModel = true
 			}
 		}
 	}
-
 	if config.ContinueLast {
 		found, err := db.FindHEAD()
 		if err == nil && found != nil && found.Model != nil && found.API != nil {
@@ -811,43 +896,40 @@ func askInfo() error {
 		}
 	}
 
-	// wrapping is done by the caller
-	//nolint:wrapcheck
-	return huh.NewForm(
+	config.API = "ollama"
+
+	// Build the form with only the necessary prompts
+	form := huh.NewForm(
+		// Group 1: Model Selection
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Choose the API:").
-				Options(apis...).
-				Value(&config.API),
-			huh.NewSelect[string]().
-				TitleFunc(func() string {
-					return fmt.Sprintf("Choose the model for '%s':", config.API)
-				}, &config.API).
-				OptionsFunc(func() []huh.Option[string] {
-					return opts[config.API]
-				}, &config.API).
+				Title("Choose an Ollama model:").
+				Options(opts["ollama"]...).
 				Value(&config.Model),
 		).WithHideFunc(func() bool {
-			// AskModel is true if the user is passing a flag to ask;
-			// FoundModel is true if a model is found for whatever config the
-			// user has (either --api/--model or default-api and
-			// default-model in settings).
-			// So, it'll only hide this if the user didn't run with
-			// `--ask-model` AND the configuration yields a valid model.
-			return !config.AskModel && foundModel
+			return !config.Chat && !config.AskModel && foundModel
 		}),
+		// Group 2: Text Prompt
 		huh.NewGroup(
 			huh.NewText().
-				TitleFunc(func() string {
-					return fmt.Sprintf("Enter a prompt for %s/%s:", config.API, config.Model)
-				}, &config.Model).
+				TitleFunc(func() string { return fmt.Sprintf("Enter a prompt for %s:", config.Model) }, &config.Model).
 				Value(&config.Prefix),
 		).WithHideFunc(func() bool {
-			return config.Prefix != ""
+			// THIS IS THE KEY CHANGE:
+			// Hide the text prompt if we are in chat mode OR if a prefix already exists.
+			return config.Chat || config.Prefix != ""
 		}),
-	).
-		WithTheme(themeFrom(config.Theme)).
-		Run()
+	).WithTheme(themeFrom(config.Theme))
+
+	if err := form.Run(); err != nil {
+		return err //nolint:wrapcheck
+	}
+
+	if _, err := UpdateConfigWithOllamaModels(config.SettingsPath, config.Model); err != nil {
+		fmt.Fprintf(os.Stderr, "\nWarning: Could not update default model in config file: %v\n", err)
+	}
+
+	return nil
 }
 
 //nolint:mnd

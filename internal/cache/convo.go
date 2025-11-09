@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/charmbracelet/mods/internal/proto"
+	"github.com/GuntuAshok/oi/internal/proto"
 )
 
 // Conversations is the conversation cache.
