@@ -33,6 +33,12 @@ func (m *Mods) setupStreamContext(content string, mod Model) error {
 				Role:    proto.RoleSystem,
 				Content: txt,
 			})
+		} else {
+			// append an empty system message when formatting is disabled or txt is empty
+			m.messages = append(m.messages, proto.Message{
+				Role:    proto.RoleSystem,
+				Content: "You are a helpful assistant",
+			})
 		}
 
 		if cfg.Role != "" {

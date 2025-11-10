@@ -161,6 +161,22 @@ var (
 			if config.MCPTimeout == 0 {
 				config.MCPTimeout = defaultConfig().MCPTimeout
 			}
+
+// Validate ambiguous no-arg flags: `--continue` must not be used by itself.
+// We allowed a NoOptDefVal sentinel ("__EMPTY__") to enable the --list combos,
+// but if the user invokes `--continue` alone it should be an error.
+const noOptSentinel = "__EMPTY__"
+if f := cmd.Flags().Lookup("continue"); f != nil {
+	if f.Changed && config.Continue == noOptSentinel && !config.List {
+		return newUserErrorf("Missing argument for %s. Use %s <id|title|sha1> or %s for the last conversation.",
+			stderrStyles().Flag.Render("--continue"),
+			stderrStyles().Flag.Render("--continue"),
+			stderrStyles().Flag.Render("--continue-last"),
+		)
+	}
+}
+
+
 			// Handle special commands (unchanged from old)
 			if config.Dirs {
 				if len(args) > 0 {
