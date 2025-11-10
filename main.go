@@ -214,8 +214,81 @@ var (
 				listRoles()
 				return nil
 			}
+			// In rootCmd.RunE, replace the existing if config.List block with:
 			if config.List {
-				return listConversations(config.Raw)
+				// Detect combo mode (updated for empty delete)
+				comboShow := config.Show == "" && !config.ShowLast
+				comboContinue := config.Continue == "" && !config.ContinueLast
+				comboDelete := len(config.Delete) > 0 && allAreEmpty(config.Delete)
+				numCombos := 0
+				if comboShow {
+					numCombos++
+				}
+				if comboContinue {
+					numCombos++
+				}
+				if comboDelete {
+					numCombos++
+				}
+
+				if numCombos > 1 {
+					// Error on conflicts
+					return newUserErrorf("Conflicting actions with --list: only one of --show, --continue, or --delete can be used. Got %d.", numCombos)
+				}
+
+				// Get selections (multi only for delete)
+				var selected []string
+				var err error
+				if comboDelete {
+					selected, err = handleListSelect(true) // Multi-select
+				} else {
+					sel, selErr := handleListSelect(false) // Single-select
+					if selErr != nil {
+						return selErr
+					}
+					if len(sel) > 0 {
+						selected = sel
+					}
+				}
+				if err != nil {
+					return err
+				}
+				if len(selected) == 0 {
+					return nil // Normal list (printed or aborted)
+				}
+
+				// Handle single combo (use first selected for non-multi)
+				selID := selected[0]
+
+				if comboShow {
+					config.Show = selID
+					config.List = false // Reset for fall-through
+					// Fall through to runMods (load/print)
+				} else if comboContinue {
+					config.Continue = selID
+					config.List = false // Reset for fall-through + prompt
+					// Fall through to non-chat path (prompt for new message)
+				} else if comboDelete {
+					config.Delete = selected     // Overwrite empties with selected IDs
+					return deleteConversations() // Handle immediately (bulk if multi)
+				} else {
+					// No combo: Copy first selected and suggest (as before)
+					_ = clipboard.WriteAll(selID)
+					termenv.Copy(selID)
+					printConfirmation("COPIED", selID)
+					fmt.Println(stdoutStyles().Comment.Render(
+						"You can use this conversation ID with the following commands:",
+					))
+					suggestions := []string{"show", "continue", "delete"}
+					for _, flag := range suggestions {
+						fmt.Printf(
+							"  %-44s %s\n",
+							stdoutStyles().Flag.Render("--"+flag),
+							stdoutStyles().FlagDesc.Render(help[flag]),
+						)
+					}
+					return nil
+				}
 			}
 
 			if config.MCPList {
@@ -350,6 +423,10 @@ func initFlags() {
 	flags.BoolVarP(&config.List, "list", "l", config.List, stdoutStyles().FlagDesc.Render(help["list"]))
 	flags.StringVarP(&config.Title, "title", "t", config.Title, stdoutStyles().FlagDesc.Render(help["title"]))
 	flags.StringArrayVarP(&config.Delete, "delete", "d", config.Delete, stdoutStyles().FlagDesc.Render(help["delete"]))
+	// Enable "empty" mode for combos (prevents parse error on --delete with no arg)
+	if f := flags.Lookup("delete"); f != nil {
+		f.NoOptDefVal = ""
+	}
 	flags.Var(newDurationFlag(config.DeleteOlderThan, &config.DeleteOlderThan), "delete-older-than", stdoutStyles().FlagDesc.Render(help["delete-older-than"]))
 	flags.StringVarP(&config.Show, "show", "s", config.Show, stdoutStyles().FlagDesc.Render(help["show"]))
 	flags.BoolVarP(&config.ShowLast, "show-last", "S", false, stdoutStyles().FlagDesc.Render(help["show-last"]))
@@ -401,7 +478,6 @@ func initFlags() {
 		"show-last",
 		"delete",
 		"delete-older-than",
-		"list",
 		"continue",
 		"continue-last",
 		"reset-settings",
@@ -671,7 +747,21 @@ func deleteConversationOlderThan() error {
 	return nil
 }
 
+// ... (existing func, but add this at the top after finding convos)
 func deleteConversations() error {
+	if len(config.Delete) == 0 {
+		return nil // Shouldn't happen
+	}
+
+	// Bulk message for multi-delete
+	// Error if plain --delete with no IDs (prevents no-op)
+	if allAreEmpty(config.Delete) {
+		return newUserErrorf("No conversation IDs provided for --delete. Use --list --delete for interactive selection.")
+	}
+	if !config.Quiet && len(config.Delete) > 1 {
+		fmt.Fprintf(os.Stderr, "Deleting %d conversations...\n", len(config.Delete))
+	}
+
 	for _, del := range config.Delete {
 		convo, err := db.Find(del)
 		if err != nil {
@@ -700,25 +790,6 @@ func deleteConversation(convo *Conversation) error {
 	if !config.Quiet {
 		fmt.Fprintln(os.Stderr, "Conversation deleted:", convo.ID[:sha1minLen])
 	}
-	return nil
-}
-
-func listConversations(raw bool) error {
-	conversations, err := db.List()
-	if err != nil {
-		return modsError{err, "Couldn't list saves."}
-	}
-
-	if len(conversations) == 0 {
-		fmt.Fprintln(os.Stderr, "No conversations found.")
-		return nil
-	}
-
-	if isInputTTY() && isOutputTTY() && !raw {
-		selectFromList(conversations)
-		return nil
-	}
-	printList(conversations)
 	return nil
 }
 
@@ -761,39 +832,6 @@ func makeOptions(conversations []Conversation) []huh.Option[string] {
 	return opts
 }
 
-func selectFromList(conversations []Conversation) {
-	var selected string
-	if err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Conversations").
-				Value(&selected).
-				Options(makeOptions(conversations)...),
-		),
-	).Run(); err != nil {
-		if !errors.Is(err, huh.ErrUserAborted) {
-			fmt.Fprintln(os.Stderr, err.Error())
-		}
-		return
-	}
-
-	_ = clipboard.WriteAll(selected)
-	termenv.Copy(selected)
-	printConfirmation("COPIED", selected)
-	// suggest actions to use this conversation ID
-	fmt.Println(stdoutStyles().Comment.Render(
-		"You can use this conversation ID with the following commands:",
-	))
-	suggestions := []string{"show", "continue", "delete"}
-	for _, flag := range suggestions {
-		fmt.Printf(
-			"  %-44s %s\n",
-			stdoutStyles().Flag.Render("--"+flag),
-			stdoutStyles().FlagDesc.Render(help[flag]),
-		)
-	}
-}
-
 func printList(conversations []Conversation) {
 	for _, conversation := range conversations {
 		_, _ = fmt.Fprintf(
@@ -804,6 +842,81 @@ func printList(conversations []Conversation) {
 			stdoutStyles().Timeago.Render(timeago.Of(conversation.UpdatedAt)),
 		)
 	}
+}
+
+// allAreEmpty checks if all strings in the slice are empty (for interactive delete detection).
+func allAreEmpty(ss []string) bool {
+	for _, s := range ss {
+		if s != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// handleListSelect lists conversations and returns selected ID(s) if interactive
+// and a selection was made. For multi-delete, returns a slice. Returns nil/empty otherwise.
+func handleListSelect(multiDelete bool) ([]string, error) {
+	conversations, err := db.List()
+	if err != nil {
+		return nil, modsError{err, "Couldn't list saves."}
+	}
+
+	if len(conversations) == 0 {
+		fmt.Fprintln(os.Stderr, "No conversations found.")
+		return nil, nil
+	}
+
+	isInteractive := isInputTTY() && isOutputTTY() && !config.Raw
+	if !isInteractive {
+		printList(conversations)
+		return nil, nil
+	}
+
+	// Interactive select: Single or multi based on mode
+	var selected []string // For multi; single will use first elem
+	if multiDelete {
+		form := huh.NewForm(
+			huh.NewGroup(
+				huh.NewMultiSelect[string]().
+					Title("Select conversations to delete (use space to toggle, enter to confirm)").
+					Value(&selected).
+					Options(makeOptions(conversations)...),
+			),
+		).WithTheme(themeFrom(config.Theme))
+
+		if err := form.Run(); err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				return nil, nil // Graceful exit
+			}
+			return nil, modsError{err, "Selection failed."}
+		}
+	} else {
+		// Single select (for plain --list or other non-delete combos)
+		var single string
+		form := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Conversations").
+					Value(&single).
+					Options(makeOptions(conversations)...),
+			),
+		).WithTheme(themeFrom(config.Theme))
+
+		if err := form.Run(); err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				return nil, nil // Graceful exit
+			}
+			return nil, modsError{err, "Selection failed."}
+		}
+		selected = []string{single}
+	}
+
+	if len(selected) == 0 {
+		return nil, nil // No selection
+	}
+
+	return selected, nil
 }
 
 // saveConversation has been corrected to use the session-specific config from the Mods instance.
