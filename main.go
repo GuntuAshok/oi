@@ -216,10 +216,12 @@ var (
 			}
 			// In rootCmd.RunE, replace the existing if config.List block with:
 			if config.List {
-				// Detect combo mode (updated for empty delete)
-				comboShow := config.Show == "" && !config.ShowLast
-				comboContinue := config.Continue == "" && !config.ContinueLast
-				comboDelete := len(config.Delete) > 0 && allAreEmpty(config.Delete)
+				const noOptSentinel = "__EMPTY__" // same sentinel as above
+
+				comboShow := cmd.Flags().Changed("show") && (config.Show == "" || config.Show == noOptSentinel) && !config.ShowLast
+				comboContinue := cmd.Flags().Changed("continue") && (config.Continue == "" || config.Continue == noOptSentinel) && !config.ContinueLast
+				comboDelete := cmd.Flags().Changed("delete") && allAreEmpty(config.Delete)
+
 				numCombos := 0
 				if comboShow {
 					numCombos++
@@ -423,13 +425,24 @@ func initFlags() {
 	flags.BoolVarP(&config.List, "list", "l", config.List, stdoutStyles().FlagDesc.Render(help["list"]))
 	flags.StringVarP(&config.Title, "title", "t", config.Title, stdoutStyles().FlagDesc.Render(help["title"]))
 	flags.StringArrayVarP(&config.Delete, "delete", "d", config.Delete, stdoutStyles().FlagDesc.Render(help["delete"]))
-	// Enable "empty" mode for combos (prevents parse error on --delete with no arg)
-	if f := flags.Lookup("delete"); f != nil {
-		f.NoOptDefVal = ""
-	}
 	flags.Var(newDurationFlag(config.DeleteOlderThan, &config.DeleteOlderThan), "delete-older-than", stdoutStyles().FlagDesc.Render(help["delete-older-than"]))
 	flags.StringVarP(&config.Show, "show", "s", config.Show, stdoutStyles().FlagDesc.Render(help["show"]))
 	flags.BoolVarP(&config.ShowLast, "show-last", "S", false, stdoutStyles().FlagDesc.Render(help["show-last"]))
+	
+	// Enable "empty" mode for combos (prevents parse error on --delete with no arg)
+	const noOptSentinel = "__EMPTY__"
+
+	if f := flags.Lookup("delete"); f != nil {
+		f.NoOptDefVal = noOptSentinel
+	}
+	if f := flags.Lookup("show"); f != nil {
+		f.NoOptDefVal = noOptSentinel
+	}
+	if f := flags.Lookup("continue"); f != nil {
+		f.NoOptDefVal = noOptSentinel
+	}
+
+
 	flags.BoolVarP(&config.Quiet, "quiet", "q", config.Quiet, stdoutStyles().FlagDesc.Render(help["quiet"]))
 	flags.BoolVarP(&config.ShowHelp, "help", "h", false, stdoutStyles().FlagDesc.Render(help["help"]))
 	flags.BoolVarP(&config.Version, "version", "v", false, stdoutStyles().FlagDesc.Render(help["version"]))
@@ -516,6 +529,7 @@ func main() {
 	}
 	// XXX: this must come after creating the config.
 	initFlags()
+
 
 	if !isCompletionCmd(os.Args) && !isManCmd(os.Args) && !isVersionOrHelpCmd(os.Args) {
 		db, err = openDB(filepath.Join(config.CachePath, "conversations", "mods.db"))
@@ -846,12 +860,12 @@ func printList(conversations []Conversation) {
 
 // allAreEmpty checks if all strings in the slice are empty (for interactive delete detection).
 func allAreEmpty(ss []string) bool {
-	for _, s := range ss {
-		if s != "" {
-			return false
-		}
-	}
-	return true
+    for _, s := range ss {
+        if s != "" && s != "__EMPTY__" {
+            return false
+        }
+    }
+    return true
 }
 
 // handleListSelect lists conversations and returns selected ID(s) if interactive
