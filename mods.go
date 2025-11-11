@@ -148,7 +148,6 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Config.ShowHelp ||
 			m.Config.List ||
 			m.Config.ListRoles ||
-			m.Config.Settings ||
 			m.Config.ResetSettings {
 			return m, m.quit
 		}

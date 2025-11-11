@@ -61,7 +61,6 @@ var help = map[string]string{
 	"topk":              "TopK, only sample from the top K options for each subsequent token, -1 to disable",
 	"fanciness":         "Your desired level of fanciness",
 	"status-text":       "Text to show while generating",
-	"settings":          "Open settings in your $EDITOR",
 	"dirs":              "Print the directories in which mods store its data",
 	"reset-settings":    "Backup your old settings file and reset everything to the defaults",
 	"continue":          "Continue from the last response or a given save title",
@@ -74,7 +73,6 @@ var help = map[string]string{
 	"show":              "Show a saved conversation with the given title or ID",
 	"theme":             "Theme to use in the forms; valid choices are charm, catppuccin, dracula, and base16",
 	"show-last":         "Show the last saved conversation",
-	"editor":            "Edit the prompt in your $EDITOR; only taken into account if no other args and if STDIN is a TTY",
 	"mcp-servers":       "MCP Servers configurations",
 	"mcp-disable":       "Disable specific MCP servers",
 	"mcp-list":          "List all available MCP servers",
@@ -177,7 +175,6 @@ type Config struct {
 	ResetSettings       bool
 	Prefix              string
 	Version             bool
-	Settings            bool
 	Dirs                bool
 	Theme               string
 	SettingsPath        string
@@ -199,7 +196,6 @@ type Config struct {
 	MCPDisable   []string
 	MCPTimeout   time.Duration `yaml:"mcp-timeout" env:"MCP_TIMEOUT"`
 
-	openEditor                                         bool
 	cacheReadFromID, cacheWriteToID, cacheWriteToTitle string
 }
 
@@ -569,5 +565,3 @@ func usageFunc(cmd *cobra.Command) error {
 
 	return nil
 }
-
-

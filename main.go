@@ -14,15 +14,13 @@ import (
 	"strings"
 
 	"github.com/GuntuAshok/oi/internal/cache"
-	"github.com/atotto/clipboard"
 	timeago "github.com/caarlos0/timea.go"
 	tea "github.com/charmbracelet/bubbletea"
 	glamour "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/x/editor"
 	mcobra "github.com/muesli/mango-cobra"
 	"github.com/muesli/roff"
-	"github.com/muesli/termenv"
+
 	"github.com/spf13/cobra"
 )
 
@@ -194,30 +192,6 @@ if f := cmd.Flags().Lookup("continue"); f != nil {
 				return nil
 			}
 
-			if config.Settings {
-				c, err := editor.Cmd("mods", config.SettingsPath)
-				if err != nil {
-					return modsError{
-						err:    err,
-						reason: "Could not edit your settings file.",
-					}
-				}
-				c.Stdin = os.Stdin
-				c.Stdout = os.Stdout
-				c.Stderr = os.Stderr
-				if err := c.Run(); err != nil {
-					return modsError{err, fmt.Sprintf(
-						"Missing %s.",
-						stderrStyles().InlineCode.Render("$EDITOR"),
-					)}
-				}
-
-				if !config.Quiet {
-					fmt.Fprintln(os.Stderr, "Wrote config file to:", config.SettingsPath)
-				}
-				return nil
-			}
-
 			if config.ResetSettings {
 				return resetSettings()
 			}
@@ -290,10 +264,8 @@ if f := cmd.Flags().Lookup("continue"); f != nil {
 					config.Delete = selected     // Overwrite empties with selected IDs
 					return deleteConversations() // Handle immediately (bulk if multi)
 				} else {
-					// No combo: Copy first selected and suggest (as before)
-					_ = clipboard.WriteAll(selID)
-					termenv.Copy(selID)
-					printConfirmation("COPIED", selID)
+					// No combo: Print selected ID and suggest (as before)
+					fmt.Printf("\nSelected Conversation ID: %s\n\n", stdoutStyles().SHA1.Render(selID))
 					fmt.Println(stdoutStyles().Comment.Render(
 						"You can use this conversation ID with the following commands:",
 					))
@@ -384,14 +356,6 @@ if f := cmd.Flags().Lookup("continue"); f != nil {
 			// **OLD NON-CHAT PATH: Prefix, editor, askInfo (unchanged)**
 			config.Prefix = removeWhitespace(strings.Join(args, " "))
 
-			if isNoArgs() && isInputTTY() && config.openEditor {
-				prompt, err := prefixFromEditor()
-				if err != nil {
-					return err
-				}
-				config.Prefix = prompt
-			}
-
 			if (isNoArgs() || config.AskModel) && isInputTTY() {
 				if err := askInfo(); err != nil && err == huh.ErrUserAborted {
 					return modsError{
@@ -474,12 +438,10 @@ func initFlags() {
 	flags.StringVar(&config.StatusText, "status-text", config.StatusText, stdoutStyles().FlagDesc.Render(help["status-text"]))
 	flags.BoolVar(&config.NoCache, "no-cache", config.NoCache, stdoutStyles().FlagDesc.Render(help["no-cache"]))
 	flags.BoolVar(&config.ResetSettings, "reset-settings", config.ResetSettings, stdoutStyles().FlagDesc.Render(help["reset-settings"]))
-	flags.BoolVar(&config.Settings, "settings", false, stdoutStyles().FlagDesc.Render(help["settings"]))
 	flags.BoolVar(&config.Dirs, "dirs", false, stdoutStyles().FlagDesc.Render(help["dirs"]))
 	flags.StringVarP(&config.Role, "role", "R", config.Role, stdoutStyles().FlagDesc.Render(help["role"]))
 	flags.BoolVar(&config.ListRoles, "list-roles", config.ListRoles, stdoutStyles().FlagDesc.Render(help["list-roles"]))
 	flags.StringVar(&config.Theme, "theme", "charm", stdoutStyles().FlagDesc.Render(help["theme"]))
-	flags.BoolVarP(&config.openEditor, "editor", "e", false, stdoutStyles().FlagDesc.Render(help["editor"]))
 	flags.BoolVar(&config.MCPList, "mcp-list", false, stdoutStyles().FlagDesc.Render(help["mcp-list"]))
 	flags.BoolVar(&config.MCPListTools, "mcp-list-tools", false, stdoutStyles().FlagDesc.Render(help["mcp-list-tools"]))
 	flags.StringArrayVar(&config.MCPDisable, "mcp-disable", nil, stdoutStyles().FlagDesc.Render(help["mcp-disable"]))
@@ -502,7 +464,6 @@ func initFlags() {
 	})
 
 	rootCmd.MarkFlagsMutuallyExclusive(
-		"settings",
 		"show",
 		"show-last",
 		"delete",
@@ -1011,7 +972,6 @@ func isNoArgs() bool {
 		!config.MCPList &&
 		!config.MCPListTools &&
 		!config.Dirs &&
-		!config.Settings &&
 		!config.ResetSettings
 }
 
@@ -1143,32 +1103,4 @@ func themeFrom(theme string) *huh.Theme {
 	default:
 		return huh.ThemeCharm()
 	}
-}
-
-// creates a temp file, opens it in user's editor, and then returns its contents.
-func prefixFromEditor() (string, error) {
-	f, err := os.CreateTemp("", "prompt")
-	if err != nil {
-		return "", fmt.Errorf("could not create temporary file: %w", err)
-	}
-	_ = f.Close()
-	defer func() { _ = os.Remove(f.Name()) }()
-	cmd, err := editor.Cmd(
-		"mods",
-		f.Name(),
-	)
-	if err != nil {
-		return "", fmt.Errorf("could not open editor: %w", err)
-	}
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("could not open editor: %w", err)
-	}
-	prompt, err := os.ReadFile(f.Name())
-	if err != nil {
-		return "", fmt.Errorf("could not read file: %w", err)
-	}
-	return string(prompt), nil
 }

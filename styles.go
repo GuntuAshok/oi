@@ -1,9 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -49,16 +46,4 @@ func makeStyles(r *lipgloss.Renderer) (s styles) {
 	return s
 }
 
-// action messages
 
-const defaultAction = "WROTE"
-
-var outputHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("#F1F1F1")).Background(lipgloss.Color("#6C50FF")).Bold(true).Padding(0, 1).MarginRight(1)
-
-func printConfirmation(action, content string) {
-	if action == "" {
-		action = defaultAction
-	}
-	outputHeader = outputHeader.SetString(strings.ToUpper(action))
-	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Center, outputHeader.String(), content))
-}
