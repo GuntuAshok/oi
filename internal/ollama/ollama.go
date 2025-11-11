@@ -162,16 +162,38 @@ func (s *Stream) Err() error { return s.err }
 func (s *Stream) Messages() []proto.Message { return s.messages }
 
 // Next implements stream.Stream.
+// ollama.go
+
+// Next implements stream.Stream.
 func (s *Stream) Next() bool {
 	if s.err != nil {
 		return false
 	}
 	if s.done {
 		s.done = false
-		s.factory()
+
+		// IMPORTANT: Check for tools *before* resetting s.message
+		hasTools := len(s.message.ToolCalls) > 0
+
+		// Add the completed assistant message to our internal histories
 		s.messages = append(s.messages, toProtoMessage(s.message))
 		s.request.Messages = append(s.request.Messages, s.message)
+
+		// Reset the message buffer
 		s.message = api.Message{}
+
+		if hasTools {
+			// If we had tools, the stream is expected to continue.
+			// The app will call CallTools(), and we re-run the factory
+			// to send the tool results back to the model.
+			s.factory()
+		}
+
+		// If hasTools was true, we stop this read loop (return false),
+		// but the factory has started the *next* request.
+		//
+		// If hasTools was false, we just stop. No new API call is made.
+		// The main app will wait for the next user input.
 		return false
 	}
 	return true
