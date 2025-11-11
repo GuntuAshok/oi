@@ -608,8 +608,7 @@ func (m *Mods) resolveModel(cfg *Config) (API, Model, error) {
 			m.Styles.InlineCode.Render(cfg.Model),
 		),
 		err: newUserErrorf(
-			"Please configure the model in the settings: %s",
-			m.Styles.InlineCode.Render("mods --settings"),
+			"Please configure the model in the config file. Use oi --dirs",
 		),
 	}
 }

@@ -61,7 +61,7 @@ var help = map[string]string{
 	"topk":              "TopK, only sample from the top K options for each subsequent token, -1 to disable",
 	"fanciness":         "Your desired level of fanciness",
 	"status-text":       "Text to show while generating",
-	"dirs":              "Print the directories in which mods store its data",
+	"dirs":              "Print the directories in which oi store its data",
 	"reset-settings":    "Backup your old settings file and reset everything to the defaults",
 	"continue":          "Continue from the last response or a given save title",
 	"continue-last":     "Continue from the last response",
@@ -429,7 +429,7 @@ func UpdateConfigWithOllamaModels(configPath string, selectedModel ...string) (b
 
 func ensureConfig() (Config, error) {
 	var c Config
-	sp, err := xdg.ConfigFile(filepath.Join("mods", "mods.yml"))
+	sp, err := xdg.ConfigFile(filepath.Join("oi", "oi.yml"))
 	if err != nil {
 		return c, modsError{err, "Could not find settings path."}
 	}
@@ -456,7 +456,7 @@ func ensureConfig() (Config, error) {
 	}
 
 	if c.CachePath == "" {
-		c.CachePath = filepath.Join(xdg.DataHome, "mods")
+		c.CachePath = filepath.Join(xdg.DataHome, "oi")
 	}
 
 	if err := os.MkdirAll(

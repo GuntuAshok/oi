@@ -137,7 +137,7 @@ var (
 	db     *convoDB
 
 	rootCmd = &cobra.Command{
-		Use:           "mods",
+		Use:           "oi",
 		Short:         "GPT on the command line. Built for pipelines.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -613,7 +613,7 @@ func handleError(err error) {
 		args = []any{
 			fmt.Sprintf(
 				"Check out %s %s",
-				stderrStyles().InlineCode.Render("mods -h"),
+				stderrStyles().InlineCode.Render("oi -h"),
 				stderrStyles().Comment.Render("for help."),
 			),
 			fmt.Sprintf(
