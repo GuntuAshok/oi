@@ -106,20 +106,50 @@ func (s *Stream) fn(resp api.ChatResponse) error {
 }
 
 // CallTools implements stream.Stream.
+// CallTools implements stream.Stream.
 func (s *Stream) CallTools() []proto.ToolCallStatus {
-	statuses := make([]proto.ToolCallStatus, 0, len(s.message.ToolCalls))
-	for _, call := range s.message.ToolCalls {
-		msg, status := stream.CallTool(
-			strconv.Itoa(call.Function.Index),
-			call.Function.Name,
-			[]byte(call.Function.Arguments.String()),
-			s.toolCall,
-		)
-		s.request.Messages = append(s.request.Messages, fromProtoMessage(msg))
-		s.messages = append(s.messages, msg)
-		statuses = append(statuses, status)
-	}
-	return statuses
+    // This function can be called after *any* s.Next() loop finishes.
+    // We must first check if the stream just finished.
+    // If it did, s.done will be true.
+    if s.done {
+        // The stream just finished. Add the completed assistant message
+        // (which might contain tool calls) to our histories.
+        s.messages = append(s.messages, toProtoMessage(s.message))
+        s.request.Messages = append(s.request.Messages, s.message)
+    }
+
+    // Now, check if this completed message *actually* had any tool calls.
+    if len(s.message.ToolCalls) == 0 {
+        // No tools to call. The conversation turn is truly over.
+        // We do not reset s.done. It stays 'true'.
+        return nil
+    }
+
+    // --- We have tools to call ---
+    statuses := make([]proto.ToolCallStatus, 0, len(s.message.ToolCalls))
+    for _, call := range s.message.ToolCalls {
+        msg, status := stream.CallTool(
+            strconv.Itoa(call.Function.Index),
+            call.Function.Name,
+            []byte(call.Function.Arguments.String()),
+            s.toolCall,
+        )
+
+        // Append the *tool result* (a "tool" role message) to the histories
+        s.request.Messages = append(s.request.Messages, fromProtoMessage(msg))
+        s.messages = append(s.messages, msg)
+        statuses = append(statuses, status)
+    }
+
+    // NOW that tools are called and results are in s.request.Messages,
+    // we reset the stream state to prepare for the *next* API call
+    // (which sends the tool results back to the model).
+    s.message = api.Message{} // Clear the message buffer
+    s.done = false            // We are no longer "done"
+    s.err = nil               // Clear any (non-fatal) stream-end errors
+    s.factory()               // Start the next API call
+
+    return statuses
 }
 
 // Close implements stream.Stream.
@@ -166,35 +196,13 @@ func (s *Stream) Messages() []proto.Message { return s.messages }
 
 // Next implements stream.Stream.
 func (s *Stream) Next() bool {
-	if s.err != nil {
-		return false
-	}
-	if s.done {
-		s.done = false
+    if s.err != nil {
+        return false
+    }
 
-		// IMPORTANT: Check for tools *before* resetting s.message
-		hasTools := len(s.message.ToolCalls) > 0
-
-		// Add the completed assistant message to our internal histories
-		s.messages = append(s.messages, toProtoMessage(s.message))
-		s.request.Messages = append(s.request.Messages, s.message)
-
-		// Reset the message buffer
-		s.message = api.Message{}
-
-		if hasTools {
-			// If we had tools, the stream is expected to continue.
-			// The app will call CallTools(), and we re-run the factory
-			// to send the tool results back to the model.
-			s.factory()
-		}
-
-		// If hasTools was true, we stop this read loop (return false),
-		// but the factory has started the *next* request.
-		//
-		// If hasTools was false, we just stop. No new API call is made.
-		// The main app will wait for the next user input.
-		return false
-	}
-	return true
+    // s.done is set to true by s.Current() when the last chunk is received.
+    // If the stream is done, return false to stop the consumer's loop.
+    // We DO NOT reset s.done or s.message here.
+    // That state is now the responsibility of s.CallTools().
+    return !s.done
 }
